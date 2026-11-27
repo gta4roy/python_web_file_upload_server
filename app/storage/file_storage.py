@@ -157,6 +157,30 @@ class FileStorage:
         except OSError as exc:
             logger.warning("Failed to delete path %s: %s", path, exc)
 
+    def resolve_stored(self, stored_filename: str) -> Path:
+        """Return the path to an existing stored file or raise FILE_NOT_FOUND."""
+        path = self.final_path_for(stored_filename)
+        if not path.is_file():
+            raise AppError(
+                "FILE_NOT_FOUND",
+                "The requested file does not exist.",
+                404,
+            )
+        return path
+
+    def read_stored(self, stored_filename: str) -> bytes:
+        """Read an entire stored file into memory (bounded by upload size limits)."""
+        path = self.resolve_stored(stored_filename)
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise AppError(
+                "INTERNAL_ERROR",
+                "An unexpected error occurred while processing the request.",
+                500,
+                log_message=f"failed to read stored file: {exc}",
+            ) from exc
+
     def delete_stored(self, stored_filename: str) -> None:
         """Delete a finalized stored file if present."""
         try:
@@ -164,6 +188,20 @@ class FileStorage:
         except AppError:
             return
         self.safe_delete(path)
+
+    def delete_stored_strict(self, stored_filename: str) -> None:
+        """Delete a stored file; missing files are OK, other OS errors raise AppError."""
+        path = self.final_path_for(stored_filename)
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError as exc:
+            raise AppError(
+                "INTERNAL_ERROR",
+                "An unexpected error occurred while processing the request.",
+                500,
+                log_message=f"failed to delete stored file: {exc}",
+            ) from exc
 
     def copy_to_temp(self, source_path: Path) -> Path:
         """Copy an existing file into a new temp path (test helper)."""

@@ -1,8 +1,13 @@
 # File Upload and Storage Server
 
-Python/Flask REST API that implements **POST `/api/v1/files`** from the OpenAPI 3.1 specification in `openapi.yaml`.
+Python/Flask REST API implementing file APIs from the OpenAPI 3.1 specification in `openapi.yaml`:
 
-This iteration uploads a single file per request, optionally encrypts it with AES-256-GCM, stores content on the filesystem, and persists metadata in a JSON file repository. List, delete, and download endpoints are intentionally not implemented yet; the architecture is ready for them.
+- **POST `/api/v1/files`** — upload a file (optional AES-256-GCM encryption)
+- **GET `/api/v1/files`** — list file metadata with `limit` / `offset` pagination
+- **DELETE `/api/v1/files/{fileId}`** — delete file content and metadata
+- **GET `/api/v1/files/{fileId}/content`** — download file bytes (decrypts when needed)
+
+Content is stored on the filesystem; metadata uses a JSON file repository.
 
 ## Architecture
 
@@ -96,6 +101,24 @@ curl -X POST http://localhost:5000/api/v1/files \
   -F "encrypt=true"
 ```
 
+List files (paginated):
+
+```bash
+curl "http://localhost:5000/api/v1/files?limit=20&offset=0"
+```
+
+Delete a file:
+
+```bash
+curl -X DELETE http://localhost:5000/api/v1/files/<file-id>
+```
+
+Download a file:
+
+```bash
+curl -OJ http://localhost:5000/api/v1/files/<file-id>/content
+```
+
 ### Example `201` response
 
 ```json
@@ -111,6 +134,26 @@ curl -X POST http://localhost:5000/api/v1/files \
 
 Headers include `Location: /api/v1/files/{id}` and `X-Request-Id`.
 
+### Example `200` list response
+
+```json
+{
+  "total": 1,
+  "limit": 20,
+  "offset": 0,
+  "files": [
+    {
+      "id": "a9e84e21-95d0-4c88-bcb2-52b99b4d8470",
+      "name": "report.pdf",
+      "size": 1048576,
+      "contentType": "application/pdf",
+      "encrypted": true,
+      "uploadedAt": "2026-11-27T12:30:00Z"
+    }
+  ]
+}
+```
+
 ## Storage layout
 
 ```text
@@ -125,8 +168,20 @@ Physical filenames are UUIDs only. Original names are metadata.
 
 ## Tests
 
+Unit/integration:
+
 ```bash
 pytest -q
+```
+
+Manual API smoke script against a running server (`openapi.yaml` operations):
+
+```bash
+./test_api.sh help
+./start_server.sh
+./test_api.sh all --file ./README.md --encrypt true
+./test_api.sh list --limit 10 --offset 0
+./stop_server.sh
 ```
 
 ## OpenAPI contract

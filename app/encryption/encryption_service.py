@@ -59,14 +59,15 @@ class EncryptionService:
     def decrypt(self, payload: bytes) -> bytes:
         """Decrypt a payload produced by :meth:`encrypt`.
 
-        Implemented now so the future download API can reuse the same format.
+        Decryption is allowed whenever a key is configured, even if new
+        encrypted uploads are disabled via ``ENCRYPTION_ENABLED=false``.
         """
-        if not self.enabled or self._key is None:
+        if self._key is None:
             raise AppError(
                 "INTERNAL_ERROR",
                 "An unexpected error occurred while processing the request.",
                 500,
-                log_message="decrypt called while encryption disabled",
+                log_message="decrypt called without encryption key",
             )
         if len(payload) < NONCE_SIZE + TAG_SIZE:
             raise AppError(

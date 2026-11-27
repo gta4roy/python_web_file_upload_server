@@ -68,3 +68,82 @@ def get_upload_file(req: Request) -> WerkzeugFileStorage:
             400,
         )
     return upload
+
+
+def parse_file_id(raw: str | None) -> str:
+    """Validate a path ``fileId`` as a UUID and return the canonical string."""
+    value = (raw or "").strip()
+    if not value:
+        raise AppError(
+            "BAD_REQUEST",
+            "Invalid file ID. Expected a UUID.",
+            400,
+        )
+    try:
+        return str(uuid.UUID(value))
+    except (TypeError, ValueError) as exc:
+        raise AppError(
+            "BAD_REQUEST",
+            "Invalid file ID. Expected a UUID.",
+            400,
+        ) from exc
+
+
+def parse_pagination_params(
+    req: Request,
+    *,
+    default_limit: int = 20,
+    max_limit: int = 100,
+) -> tuple[int, int]:
+    """Parse OpenAPI ``limit`` / ``offset`` query parameters.
+
+    Returns ``(limit, offset)`` with defaults ``20`` / ``0``.
+    """
+    limit = _parse_non_negative_int(
+        req.args.get("limit"),
+        field_name="limit",
+        default=default_limit,
+        minimum=1,
+        maximum=max_limit,
+    )
+    offset = _parse_non_negative_int(
+        req.args.get("offset"),
+        field_name="offset",
+        default=0,
+        minimum=0,
+        maximum=None,
+    )
+    return limit, offset
+
+
+def _parse_non_negative_int(
+    raw: Any,
+    *,
+    field_name: str,
+    default: int,
+    minimum: int,
+    maximum: int | None,
+) -> int:
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError) as exc:
+        raise AppError(
+            "BAD_REQUEST",
+            f"Invalid {field_name} parameter. Expected an integer.",
+            400,
+        ) from exc
+    if value < minimum:
+        raise AppError(
+            "BAD_REQUEST",
+            f"Invalid {field_name} parameter. Must be >= {minimum}.",
+            400,
+        )
+    if maximum is not None and value > maximum:
+        raise AppError(
+            "BAD_REQUEST",
+            f"Invalid {field_name} parameter. Must be <= {maximum}.",
+            400,
+        )
+    return value

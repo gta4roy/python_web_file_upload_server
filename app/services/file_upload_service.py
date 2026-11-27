@@ -1,9 +1,10 @@
-"""Business logic for file uploads."""
+"""Business logic for file uploads, listing, delete, and download."""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from werkzeug.datastructures import FileStorage as WerkzeugFileStorage
@@ -17,6 +18,17 @@ from app.repositories.base_repository import MetadataRepository
 from app.storage.file_storage import FileStorage
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FileDownload:
+    """Payload needed to stream a download response."""
+
+    metadata: FileMetadata
+    # Unencrypted files are streamed from disk.
+    path: Path | None = None
+    # Encrypted files are decrypted to plaintext bytes (bounded by max size).
+    content: bytes | None = None
 
 
 class FileUploadService:
@@ -123,6 +135,119 @@ class FileUploadService:
             if temp_path is not None and not finalized:
                 self.storage.safe_delete(temp_path)
             raise
+
+    def list_files(self, *, limit: int, offset: int) -> dict:
+        """Return paginated public file metadata (OpenAPI FileListResponse)."""
+        try:
+            page, total = self.repository.list_files(limit=limit, offset=offset)
+        except AppError:
+            raise
+        except Exception as exc:
+            logger.exception("Failed to list files")
+            raise AppError(
+                "INTERNAL_ERROR",
+                "An unexpected error occurred while processing the request.",
+                500,
+                log_message=str(exc),
+            ) from exc
+
+        return {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "files": [item.to_api_dict() for item in page],
+        }
+
+    def delete_file(self, file_id: str) -> None:
+        """Delete stored content and metadata for ``file_id``.
+
+        Raises ``AppError`` with 404 when the file ID is unknown.
+        Removes the physical file first, then metadata, so a successful
+        response does not leave orphaned metadata for a deleted file.
+        """
+        try:
+            metadata = self.repository.get_by_id(file_id)
+        except AppError:
+            raise
+        except Exception as exc:
+            logger.exception("Failed to load metadata for delete id=%s", file_id)
+            raise AppError(
+                "INTERNAL_ERROR",
+                "An unexpected error occurred while processing the request.",
+                500,
+                log_message=str(exc),
+            ) from exc
+
+        if metadata is None:
+            raise AppError(
+                "FILE_NOT_FOUND",
+                "The requested file does not exist.",
+                404,
+            )
+
+        self.storage.delete_stored_strict(metadata.stored_filename)
+
+        try:
+            removed = self.repository.delete(file_id)
+        except AppError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Metadata delete failed after file removal id=%s", file_id
+            )
+            raise AppError(
+                "INTERNAL_ERROR",
+                "An unexpected error occurred while processing the request.",
+                500,
+                log_message=str(exc),
+            ) from exc
+
+        if not removed:
+            # Race: another request deleted metadata after our get_by_id.
+            raise AppError(
+                "FILE_NOT_FOUND",
+                "The requested file does not exist.",
+                404,
+            )
+
+        logger.info("Deleted file id=%s", file_id)
+
+    def get_download(self, file_id: str) -> FileDownload:
+        """Load metadata and content for download (OpenAPI downloadFile)."""
+        try:
+            metadata = self.repository.get_by_id(file_id)
+        except AppError:
+            raise
+        except Exception as exc:
+            logger.exception("Failed to load metadata for download id=%s", file_id)
+            raise AppError(
+                "INTERNAL_ERROR",
+                "An unexpected error occurred while processing the request.",
+                500,
+                log_message=str(exc),
+            ) from exc
+
+        if metadata is None:
+            raise AppError(
+                "FILE_NOT_FOUND",
+                "The requested file does not exist.",
+                404,
+            )
+
+        if metadata.encrypted:
+            ciphertext = self.storage.read_stored(metadata.stored_filename)
+            plaintext = self.encryption.decrypt(ciphertext)
+            if len(plaintext) != metadata.size_bytes:
+                logger.warning(
+                    "Decrypted size mismatch id=%s expected=%s actual=%s",
+                    file_id,
+                    metadata.size_bytes,
+                    len(plaintext),
+                )
+            return FileDownload(metadata=metadata, content=plaintext)
+
+        path = self.storage.resolve_stored(metadata.stored_filename)
+        return FileDownload(metadata=metadata, path=path)
 
     @staticmethod
     def _normalize_filename(filename: str | None) -> str:

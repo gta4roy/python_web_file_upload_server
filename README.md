@@ -184,6 +184,20 @@ Manual API smoke script against a running server (`openapi.yaml` operations):
 ./stop_server.sh
 ```
 
+### Grafana k6 load test
+
+Each iteration: **upload → list → download → delete**. The runner generates a random file of the requested size.
+
+```bash
+./start_server.sh
+./run_load_test.sh --help
+./run_load_test.sh 5 50 64K
+./run_load_test.sh --users 10 --iterations 100 --file-size 1M --encrypt false
+./stop_server.sh
+```
+
+Requires [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) on `PATH`.
+
 ## OpenAPI contract
 
 The public response and error shapes follow `openapi.yaml`:

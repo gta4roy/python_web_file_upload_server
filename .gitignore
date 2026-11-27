@@ -27,6 +27,8 @@ storage/temp/*
 !storage/temp/.gitkeep
 server.pid
 logs/
+loadtest/payloads/
+loadtest/results/
 
 # IDE / OS
 .idea/

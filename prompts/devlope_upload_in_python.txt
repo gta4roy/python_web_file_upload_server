@@ -1,0 +1,501 @@
+# Role
+
+Act as a Senior Python Backend Developer and Software Architect with extensive experience in developing REST APIs, file storage systems, Python Flask, and scalable backend applications.
+
+Your task is to implement the first API of the File Upload Server using Python and Flask.
+
+Read and understand the existing OpenAPI/Swagger specification before implementing anything.
+
+The implementation must strictly follow the API contract defined in the Swagger document.
+
+# 1. Project Objective
+
+Develop the following REST API:
+
+**POST /api/v1/files**
+
+The API must allow clients to upload files to the server.
+
+The server must:
+
+1. Accept a file through a multipart/form-data request.
+2. Validate the uploaded file size against a configurable maximum file-size limit.
+3. Generate a unique UUID for every uploaded file.
+4. Save the uploaded file in a configurable directory on the server.
+5. Optionally encrypt the file if the client enables encryption.
+6. Store file metadata in a file-based database.
+7. Return the generated file ID and associated metadata in the API response.
+
+Only implement the upload API for now.
+
+Do not implement the list, delete, or download APIs.
+
+However, design the application architecture so that these APIs can be added later without major modifications.
+
+# 2. Technology Stack
+
+Use the following technologies:
+
+- Python 3.12 or newer.
+- Flask (latest stable compatible version).
+- Werkzeug.
+- SQLite or a JSON-based file repository for metadata storage.
+- Python UUID library for generating file IDs.
+- AES-256-GCM for optional encryption.
+- PyCryptodome or another maintained cryptographic library.
+- python-dotenv for environment configuration.
+- pytest for unit and integration testing.
+- Gunicorn as the production WSGI server.
+
+Use currently maintained stable dependencies and compatible versions.
+
+Create a requirements.txt file with appropriately constrained dependency versions.
+
+# 3. API Specification
+
+## Endpoint
+
+POST /api/v1/files
+
+## Request Content-Type
+
+multipart/form-data
+
+## Request Parameters
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| file | File | Yes | - | File to upload |
+| encrypt | Boolean | No | false | Whether to encrypt the file before storing it |
+
+## API Processing Flow
+
+Implement the following processing sequence:
+
+1. Receive the HTTP request.
+2. Validate the request content type.
+3. Validate that the file parameter exists.
+4. Validate that the uploaded filename is not empty.
+5. Validate the file size.
+6. Generate a UUID for the uploaded file.
+7. Generate a unique physical filename using the UUID.
+8. If encryption is enabled, encrypt the file using AES-256-GCM.
+9. Save the file in the configured storage directory.
+10. Create the file metadata record.
+11. Persist the metadata using the configured metadata repository.
+12. Return HTTP 201 with the generated file ID and metadata.
+
+Ensure that failures during file processing do not leave partially uploaded files or inconsistent metadata records.
+
+# 4. File Storage Implementation
+
+Implement a dedicated file storage module.
+
+Requirements:
+
+- The storage directory must be configurable.
+- The server must create the storage directory automatically if it does not exist.
+- The original filename must be stored as metadata.
+- Never use the original filename directly as the physical storage filename.
+- Generate physical filenames using UUIDs.
+- Prevent path traversal attacks.
+- Do not expose physical storage paths through the API.
+- Avoid loading the entire uploaded file into memory unnecessarily.
+- Use streaming or chunk-based processing wherever practical.
+- Use temporary files during upload and encryption.
+- Move the completed file atomically to its final storage location.
+
+Suggested storage structure:
+
+storage/
+    files/
+        a9e84e21-95d0-4c88-bcb2-52b99b4d8470
+
+    temp/
+
+The physical storage filename should not contain the original filename.
+
+# 5. File Size Validation
+
+The maximum file size must be configurable.
+
+Introduce the following environment variable:
+
+MAX_FILE_SIZE_MB=100
+
+The default maximum file size should be 100 MB.
+
+Requirements:
+
+- Convert the configured MB value into bytes.
+- Use Flask's MAX_CONTENT_LENGTH configuration.
+- Implement application-level file size validation where necessary.
+- Return HTTP 413 when the maximum allowed file size is exceeded.
+- Do not hardcode the maximum file size in the upload implementation.
+- Handle cases where the configuration value is invalid.
+- Document the configuration parameter.
+
+Important:
+
+Flask/Werkzeug request-size limits can include multipart encoding overhead. Ensure that the application distinguishes the maximum permitted file size from the total HTTP request size when implementing validation.
+
+# 6. Metadata Repository Architecture
+
+The metadata storage layer must be modular and extensible.
+
+Initially, implement a JSON-based file repository for storing metadata.
+
+However, the architecture must support replacing the JSON repository with SQLite, PostgreSQL, or Redis in the future.
+
+Do not implement metadata persistence directly inside the Flask route handler.
+
+## Repository Interface
+
+Create an abstract repository interface defining operations such as:
+
+- save(metadata)
+- get_by_id(file_id)
+- delete(file_id)
+- list_files(limit, offset)
+
+Only implement save() for the current upload API if the other operations are not required yet.
+
+Define the interface so that future implementations can provide the remaining operations.
+
+## Initial Implementation
+
+Implement:
+
+JsonFileMetadataRepository
+
+The repository must:
+
+- Store metadata in a JSON file.
+- Create the metadata file automatically if it does not exist.
+- Persist records across application restarts.
+- Prevent duplicate file IDs.
+- Handle JSON serialization and deserialization safely.
+- Handle filesystem errors.
+- Avoid corrupting the metadata file if the process fails during a write.
+- Use atomic file replacement when updating metadata.
+- Implement basic locking or another suitable mechanism to prevent concurrent writes from corrupting metadata.
+
+Keep the repository interface independent of Flask.
+
+## Metadata Structure
+
+Each uploaded file must have the following metadata:
+
+{
+    "id": "a9e84e21-95d0-4c88-bcb2-52b99b4d8470",
+    "original_filename": "report.pdf",
+    "stored_filename": "a9e84e21-95d0-4c88-bcb2-52b99b4d8470",
+    "size_bytes": 1048576,
+    "content_type": "application/pdf",
+    "encrypted": true,
+    "storage_path": "/internal/storage/path",
+    "uploaded_at": "2026-11-27T12:30:00Z"
+}
+
+The storage_path must never be included in the API response.
+
+The metadata repository must be replaceable without modifying the API controller or business logic.
+
+# 7. Encryption Module
+
+Implement encryption as a separate module.
+
+Use AES-256-GCM authenticated encryption.
+
+Requirements:
+
+- Encryption must be optional.
+- The default value of encrypt must be false.
+- Encryption keys must be loaded from environment variables.
+- Never hardcode encryption keys.
+- Validate the encryption key configuration during application startup if encryption is enabled.
+- Use a cryptographically secure random nonce.
+- Persist the nonce and authentication tag in an appropriate format alongside the encrypted file or in associated metadata.
+- Ensure that decryption information is available for future download API implementation.
+- Never expose encryption keys in logs or API responses.
+- Handle encryption failures safely.
+
+For large files, do not assume that standard AES-GCM APIs support arbitrary chunk-based encryption while preserving a single authenticated message.
+
+Select a secure, documented approach for streaming encryption, or impose a configurable maximum size appropriate to the selected implementation.
+
+Do not invent a custom cryptographic algorithm.
+
+# 8. Configuration Management
+
+Create a centralized configuration module.
+
+Use environment variables and a .env file for local development.
+
+Create the following configuration parameters:
+
+APP_HOST=0.0.0.0
+APP_PORT=5000
+APP_DEBUG=false
+
+MAX_FILE_SIZE_MB=100
+
+STORAGE_DIR=./storage/files
+TEMP_DIR=./storage/temp
+
+METADATA_BACKEND=json
+METADATA_FILE=./data/file_metadata.json
+
+ENCRYPTION_ENABLED=true
+ENCRYPTION_KEY=<32-byte-key-encoded-as-hex>
+
+Requirements:
+
+- Load configuration during application initialization.
+- Validate configuration values.
+- Provide sensible defaults.
+- Fail application startup when required configuration is invalid.
+- Keep configuration separate from application logic.
+- Do not commit actual secrets to source control.
+- Provide a .env.example file.
+
+The application should support disabling encryption globally through configuration.
+
+If global encryption is disabled, reject requests that explicitly request encryption rather than silently storing files unencrypted.
+
+# 9. API Response
+
+For successful uploads, return HTTP 201.
+
+Example response:
+
+{
+    "id": "a9e84e21-95d0-4c88-bcb2-52b99b4d8470",
+    "name": "report.pdf",
+    "size": 1048576,
+    "contentType": "application/pdf",
+    "encrypted": true,
+    "uploadedAt": "2026-11-27T12:30:00Z"
+}
+
+Ensure that the response matches the existing Swagger specification.
+
+Do not return:
+
+- Physical storage path.
+- Encryption keys.
+- Internal server directory information.
+- Temporary filenames.
+
+# 10. Error Handling
+
+Implement centralized error handling.
+
+Use a consistent error response format:
+
+{
+    "code": "FILE_TOO_LARGE",
+    "message": "Uploaded file exceeds the maximum allowed size.",
+    "requestId": "req-76b8f5d2"
+}
+
+Handle at least the following cases:
+
+| HTTP Status | Scenario |
+|---|---|
+| 400 | Missing file |
+| 400 | Empty filename |
+| 400 | Invalid encryption parameter |
+| 413 | File size exceeds configured limit |
+| 415 | Unsupported request content type |
+| 500 | Internal server error |
+| 507 | Insufficient storage space |
+
+Generate a request ID for every request and include it in error responses.
+
+Do not expose stack traces or internal exception details to clients.
+
+Use appropriate logging for debugging and troubleshooting.
+
+# 11. Application Architecture
+
+Use a modular architecture with separation of responsibilities.
+
+Suggested project structure:
+
+file-upload-server/
+|
+|-- app/
+|   |
+|   |-- __init__.py
+|   |
+|   |-- controllers/
+|   |   |-- file_controller.py
+|   |
+|   |-- services/
+|   |   |-- file_upload_service.py
+|   |
+|   |-- storage/
+|   |   |-- file_storage.py
+|   |
+|   |-- repositories/
+|   |   |-- base_repository.py
+|   |   |-- json_metadata_repository.py
+|   |
+|   |-- encryption/
+|   |   |-- encryption_service.py
+|   |
+|   |-- config/
+|   |   |-- settings.py
+|   |
+|   |-- models/
+|   |   |-- file_metadata.py
+|   |
+|   |-- errors/
+|   |   |-- error_handlers.py
+|   |
+|   |-- utils/
+|       |-- request_utils.py
+|
+|-- data/
+|-- storage/
+|   |-- files/
+|   |-- temp/
+|
+|-- tests/
+|   |-- test_file_upload.py
+|   |-- test_file_size.py
+|   |-- test_encryption.py
+|   |-- test_metadata_repository.py
+|
+|-- config/
+|   |-- .env.example
+|
+|-- run.py
+|-- requirements.txt
+|-- README.md
+|-- .gitignore
+
+You may improve this structure if you have a better architectural approach, but maintain separation between controllers, services, repositories, storage, and encryption.
+
+# 12. Application Startup
+
+Create a startup script named:
+
+run.py
+
+Requirements:
+
+- Initialize the Flask application.
+- Load configuration.
+- Initialize storage directories.
+- Initialize the metadata repository based on METADATA_BACKEND.
+- Register API routes.
+- Register centralized error handlers.
+- Start the development server when run directly.
+
+Also provide a production startup command using Gunicorn.
+
+Example:
+
+gunicorn --workers 2 --bind 0.0.0.0:5000 "app:create_app()"
+
+Do not use Flask's development server for production deployment.
+
+# 13. Testing
+
+Implement automated tests using pytest.
+
+Cover the following scenarios:
+
+1. Upload a valid file without encryption.
+2. Upload a valid file with encryption.
+3. Upload a file without providing the file parameter.
+4. Upload a file with an empty filename.
+5. Upload a file exceeding the configured size limit.
+6. Upload a file when encryption is globally disabled but the client requests encryption.
+7. Verify that a UUID is generated.
+8. Verify that the file is saved in the configured storage directory.
+9. Verify that metadata is persisted correctly.
+10. Verify that physical storage paths are not exposed in API responses.
+11. Verify that failed uploads do not leave incomplete files.
+12. Verify that metadata remains available after application restart.
+
+Use Flask's test client for API integration tests.
+
+Do not depend on external services during testing.
+
+# 14. Documentation
+
+Generate a README.md containing:
+
+- Project overview.
+- Architecture explanation.
+- Prerequisites.
+- Python environment setup.
+- Dependency installation.
+- Configuration instructions.
+- How to start the server.
+- How to start the server using Gunicorn.
+- How to upload a file using curl.
+- How to upload a file with encryption.
+- How to configure the maximum file size.
+- How to execute unit tests.
+- Example API responses.
+- Storage directory structure.
+
+Example curl command:
+
+curl -X POST http://localhost:5000/api/v1/files 
+  -F "file=@report.pdf" 
+  -F "encrypt=true"
+
+# 15. Development Instructions
+
+Follow these instructions carefully:
+
+1. First, read the existing OpenAPI/Swagger document.
+2. Understand the API contract before writing code.
+3. Inspect the existing project directory before creating files.
+4. Do not modify or implement APIs other than POST /api/v1/files.
+5. Generate modular, maintainable, well-documented Python code.
+6. Use Python type hints wherever practical.
+7. Follow PEP 8 coding conventions.
+8. Avoid unnecessary abstractions and dependencies.
+9. Do not place business logic inside Flask route handlers.
+10. Implement proper exception handling and logging.
+11. Ensure that file storage and metadata persistence are consistent.
+12. Write automated tests.
+13. Execute the tests and fix failures.
+14. Validate the API against the existing OpenAPI specification.
+
+# 16. Final Deliverables
+
+Generate a complete, runnable project containing:
+
+- Flask application.
+- Upload REST API.
+- File storage module.
+- Metadata repository interface.
+- JSON metadata repository implementation.
+- Encryption module.
+- Configuration module.
+- Startup script.
+- Gunicorn production startup instructions.
+- requirements.txt.
+- .env.example.
+- pytest test cases.
+- README.md.
+
+At the end, provide:
+
+1. Project directory structure.
+2. Summary of implemented components.
+3. Instructions to install and run the application.
+4. Example curl commands.
+5. Test execution results.
+6. Any deviations from the Swagger specification.
+
+The implementation must be runnable locally without requiring an external database or cloud service.
+
+Do not implement the other three APIs.

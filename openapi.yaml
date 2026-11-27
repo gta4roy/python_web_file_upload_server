@@ -1,0 +1,653 @@
+openapi: 3.1.0
+info:
+  title: File Upload and Storage Server API
+  version: 1.0.0
+  summary: REST API for uploading, storing, listing, downloading, and deleting files
+  description: |
+    REST API for a file upload and storage server.
+
+    ## Overview
+
+    Clients can upload files (optionally encrypted at rest), list file metadata with
+    pagination, download original file content, and delete files by ID.
+
+    ## Storage model
+
+    - **File content** is stored on the server filesystem under a configurable
+      storage directory. Physical filenames are server-generated UUIDs; the
+      original client filename is preserved only as metadata.
+    - **File metadata** is stored in a file-based database (SQLite preferred).
+      Internal fields such as `storage_path` and `stored_filename` are never
+      exposed through this API.
+
+    ## Encryption
+
+    Upload supports an optional `encrypt` flag (default `false`). When enabled,
+    the server encrypts file content before persisting it using AES-256-GCM
+    (authenticated encryption). Encryption keys are loaded from configuration or
+    environment variables and are never returned by the API. Nonce/IV and
+    authentication tags are managed server-side. On download, encrypted files are
+    decrypted transparently; decryption failures return a generic error without
+    exposing cryptographic details.
+
+    ## Limits and streaming
+
+    Uploaded file size is validated against a configurable maximum (default
+    documented as 100 MiB). Upload, encryption/decryption, and download are
+    designed to stream large files rather than load entire payloads into memory.
+
+    ## Security notes
+
+    - Client-provided filenames are treated as untrusted metadata only.
+    - Path traversal is prevented by generating server-side storage names and
+      confining I/O to the configured storage directory.
+    - File IDs must be valid UUIDs.
+    - Authentication and authorization are **out of scope for v1.0.0**, but the
+      API is designed to be extended with security schemes later.
+  contact:
+    name: API Support
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://api.example.com
+    description: Production server (example)
+
+tags:
+  - name: Files
+    description: Upload, list, download, and delete stored files
+
+# Authentication/authorization are out of scope for v1.0.0.
+# An empty security requirement documents that endpoints are currently open,
+# while remaining extensible for future schemes (e.g. bearerAuth, apiKey).
+security: []
+
+paths:
+  /api/v1/files:
+    post:
+      tags:
+        - Files
+      operationId: uploadFile
+      summary: Upload a file
+      description: |
+        Upload a single file using `multipart/form-data`.
+
+        The server:
+        1. Validates request shape and file size against the configured maximum.
+        2. Generates a UUID file ID and a unique stored filename.
+        3. Optionally encrypts the file content (AES-256-GCM) when `encrypt` is true.
+        4. Persists content to the configured storage directory.
+        5. Records metadata in the file-based database.
+        6. Returns the public file metadata (never the internal storage path).
+
+        If upload, encryption, or persistence fails, the server must not leave
+        incomplete files or orphaned metadata under normal operation.
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/FileUploadRequest'
+            encoding:
+              file:
+                contentType: application/octet-stream, application/pdf, image/*, text/*, */*
+              encrypt:
+                contentType: text/plain
+            examples:
+              plainUpload:
+                summary: Upload without encryption
+                value:
+                  file: (binary)
+                  encrypt: false
+              encryptedUpload:
+                summary: Upload with encryption enabled
+                value:
+                  file: (binary)
+                  encrypt: true
+      responses:
+        '201':
+          description: File uploaded successfully
+          headers:
+            Location:
+              description: URI of the uploaded file resource (metadata)
+              schema:
+                type: string
+                format: uri
+              example: /api/v1/files/a9e84e21-95d0-4c88-bcb2-52b99b4d8470
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileMetadata'
+              examples:
+                uploadedEncryptedPdf:
+                  $ref: '#/components/examples/FileMetadataEncrypted'
+                uploadedPlainImage:
+                  $ref: '#/components/examples/FileMetadataPlain'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
+
+    get:
+      tags:
+        - Files
+      operationId: listFiles
+      summary: List uploaded files
+      description: |
+        Return paginated metadata for uploaded files.
+
+        The response never includes binary file content or internal storage paths.
+        Use `limit` and `offset` for pagination. `total` is the full count of
+        matching files (not just the current page).
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Maximum number of files to return in this page.
+            Defaults to 20. Maximum allowed value is 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+            example: 20
+        - name: offset
+          in: query
+          required: false
+          description: Number of records to skip before returning results.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+            example: 0
+      responses:
+        '200':
+          description: Paginated list of file metadata
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileListResponse'
+              examples:
+                defaultPage:
+                  $ref: '#/components/examples/FileListPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/files/{fileId}:
+    delete:
+      tags:
+        - Files
+      operationId: deleteFile
+      summary: Delete a file
+      description: |
+        Delete a file and its metadata by file ID.
+
+        The server validates the UUID, removes the physical file from the storage
+        directory, and deletes the corresponding database record. Under normal
+        operation the delete is consistent (no orphaned files or leftover metadata).
+        Filesystem errors are mapped to appropriate error responses without
+        exposing internal paths.
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/FileId'
+      responses:
+        '204':
+          description: File deleted successfully (no response body)
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/FileNotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/files/{fileId}/content:
+    get:
+      tags:
+        - Files
+      operationId: downloadFile
+      summary: Download a file
+      description: |
+        Download the binary content of a stored file by file ID.
+
+        - Unencrypted files are streamed as stored.
+        - Encrypted files are decrypted during retrieval and streamed as the
+          original plaintext content.
+        - `Content-Type` reflects the stored MIME type.
+        - `Content-Disposition` uses the original filename so clients can save
+          the file with its original name.
+        - The response body is raw binary data, not JSON.
+
+        Decryption failures return an error without exposing keys, nonces, or
+        cryptographic internals.
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/FileId'
+      responses:
+        '200':
+          description: File content streamed successfully
+          headers:
+            Content-Type:
+              description: MIME type of the original uploaded file
+              schema:
+                type: string
+              example: application/pdf
+            Content-Disposition:
+              description: |
+                Attachment disposition with the original filename.
+                Example: `attachment; filename="report.pdf"`
+              schema:
+                type: string
+              example: attachment; filename="report.pdf"
+            Content-Length:
+              description: Size of the response body in bytes (original/plaintext size)
+              schema:
+                type: integer
+                format: int64
+              example: 1048576
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+              examples:
+                binaryFile:
+                  summary: Raw file bytes
+                  value: (binary)
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            text/plain:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/FileNotFound'
+        '500':
+          description: |
+            Unexpected server error, including decryption failure for an encrypted
+            file. Cryptographic details are never exposed.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                internal:
+                  $ref: '#/components/examples/ErrorInternal'
+                decryptionFailed:
+                  summary: Decryption failure
+                  value:
+                    code: DECRYPTION_FAILED
+                    message: Unable to decrypt the requested file.
+                    requestId: req-76b8f5d2
+
+components:
+  parameters:
+    FileId:
+      name: fileId
+      in: path
+      required: true
+      description: Unique file identifier (UUID) generated at upload time.
+      schema:
+        $ref: '#/components/schemas/FileId'
+      example: a9e84e21-95d0-4c88-bcb2-52b99b4d8470
+
+    RequestIdHeader:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: |
+        Optional client-supplied request correlation ID. If omitted, the server
+        generates one and returns it on `X-Request-Id` and in error bodies as
+        `requestId`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        example: req-76b8f5d2
+
+  headers:
+    X-Request-Id:
+      description: Request correlation identifier for troubleshooting
+      schema:
+        type: string
+        example: req-76b8f5d2
+      required: true
+
+  schemas:
+    FileId:
+      type: string
+      format: uuid
+      description: Server-generated unique file identifier
+      example: a9e84e21-95d0-4c88-bcb2-52b99b4d8470
+
+    FileUploadRequest:
+      type: object
+      required:
+        - file
+      properties:
+        file:
+          type: string
+          format: binary
+          description: |
+            The file content to upload. One file per request.
+            Maximum size is configurable; default documented limit is 104857600
+            bytes (100 MiB). Requests exceeding the limit receive HTTP 413.
+        encrypt:
+          type: boolean
+          default: false
+          description: |
+            When `true`, encrypt the file with AES-256-GCM before storing it on
+            disk. When omitted or `false`, store the file as plaintext.
+            Encryption keys are server-managed and never returned by the API.
+          example: false
+
+    FileMetadata:
+      type: object
+      required:
+        - id
+        - name
+        - size
+        - contentType
+        - encrypted
+        - uploadedAt
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/FileId'
+        name:
+          type: string
+          description: Original filename supplied by the client (metadata only)
+          minLength: 1
+          maxLength: 255
+          example: report.pdf
+        size:
+          type: integer
+          format: int64
+          description: Original file size in bytes (pre-encryption size)
+          minimum: 0
+          example: 1048576
+        contentType:
+          type: string
+          description: MIME content type of the uploaded file
+          minLength: 1
+          maxLength: 255
+          example: application/pdf
+        encrypted:
+          type: boolean
+          description: Whether the file was encrypted before being stored
+          example: true
+        uploadedAt:
+          type: string
+          format: date-time
+          description: Upload timestamp in UTC (ISO 8601)
+          example: '2026-11-27T12:30:00Z'
+      description: |
+        Public file metadata. Internal fields such as storage path and stored
+        filename are intentionally omitted.
+
+    FileListResponse:
+      type: object
+      required:
+        - total
+        - limit
+        - offset
+        - files
+      additionalProperties: false
+      properties:
+        total:
+          type: integer
+          format: int64
+          description: Total number of files matching the query (across all pages)
+          minimum: 0
+          example: 2
+        limit:
+          type: integer
+          description: Page size applied to this response
+          minimum: 1
+          maximum: 100
+          example: 20
+        offset:
+          type: integer
+          description: Number of records skipped before this page
+          minimum: 0
+          example: 0
+        files:
+          type: array
+          description: File metadata objects for the current page
+          items:
+            $ref: '#/components/schemas/FileMetadata'
+
+    ErrorResponse:
+      type: object
+      required:
+        - code
+        - message
+        - requestId
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+          enum:
+            - BAD_REQUEST
+            - FILE_NOT_FOUND
+            - PAYLOAD_TOO_LARGE
+            - UNSUPPORTED_MEDIA_TYPE
+            - INTERNAL_ERROR
+            - INSUFFICIENT_STORAGE
+            - DECRYPTION_FAILED
+          example: FILE_NOT_FOUND
+        message:
+          type: string
+          description: Human-readable error description
+          minLength: 1
+          example: The requested file does not exist.
+        requestId:
+          type: string
+          description: Request identifier for troubleshooting
+          minLength: 1
+          example: req-76b8f5d2
+      description: Consistent error envelope for all API failures
+
+  examples:
+    FileMetadataEncrypted:
+      summary: Encrypted PDF upload result
+      value:
+        id: a9e84e21-95d0-4c88-bcb2-52b99b4d8470
+        name: report.pdf
+        size: 1048576
+        contentType: application/pdf
+        encrypted: true
+        uploadedAt: '2026-11-27T12:30:00Z'
+
+    FileMetadataPlain:
+      summary: Unencrypted image metadata
+      value:
+        id: b8f15a31-4a00-4a11-9910-83924ef8f210
+        name: image.png
+        size: 204800
+        contentType: image/png
+        encrypted: false
+        uploadedAt: '2026-11-27T12:35:00Z'
+
+    FileListPage:
+      summary: First page of file listings
+      value:
+        total: 2
+        limit: 20
+        offset: 0
+        files:
+          - id: a9e84e21-95d0-4c88-bcb2-52b99b4d8470
+            name: report.pdf
+            size: 1048576
+            contentType: application/pdf
+            encrypted: true
+            uploadedAt: '2026-11-27T12:30:00Z'
+          - id: b8f15a31-4a00-4a11-9910-83924ef8f210
+            name: image.png
+            size: 204800
+            contentType: image/png
+            encrypted: false
+            uploadedAt: '2026-11-27T12:35:00Z'
+
+    ErrorFileNotFound:
+      summary: File not found
+      value:
+        code: FILE_NOT_FOUND
+        message: The requested file does not exist.
+        requestId: req-76b8f5d2
+
+    ErrorBadRequest:
+      summary: Invalid request
+      value:
+        code: BAD_REQUEST
+        message: Invalid request parameters.
+        requestId: req-76b8f5d2
+
+    ErrorPayloadTooLarge:
+      summary: File exceeds size limit
+      value:
+        code: PAYLOAD_TOO_LARGE
+        message: Uploaded file exceeds the maximum allowed size of 104857600 bytes.
+        requestId: req-76b8f5d2
+
+    ErrorUnsupportedMediaType:
+      summary: Wrong request content type
+      value:
+        code: UNSUPPORTED_MEDIA_TYPE
+        message: Request must use multipart/form-data for file upload.
+        requestId: req-76b8f5d2
+
+    ErrorInternal:
+      summary: Unexpected server failure
+      value:
+        code: INTERNAL_ERROR
+        message: An unexpected error occurred while processing the request.
+        requestId: req-76b8f5d2
+
+    ErrorInsufficientStorage:
+      summary: Storage exhausted
+      value:
+        code: INSUFFICIENT_STORAGE
+        message: Insufficient storage capacity to complete the upload.
+        requestId: req-76b8f5d2
+
+  responses:
+    BadRequest:
+      description: Invalid request (malformed parameters, missing file, invalid UUID, etc.)
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            badRequest:
+              $ref: '#/components/examples/ErrorBadRequest'
+
+    FileNotFound:
+      description: No file exists for the given file ID
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            notFound:
+              $ref: '#/components/examples/ErrorFileNotFound'
+
+    PayloadTooLarge:
+      description: |
+        Uploaded file exceeds the configured maximum size limit
+        (default 104857600 bytes / 100 MiB).
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            tooLarge:
+              $ref: '#/components/examples/ErrorPayloadTooLarge'
+
+    UnsupportedMediaType:
+      description: Request Content-Type is not supported (upload requires multipart/form-data)
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            unsupported:
+              $ref: '#/components/examples/ErrorUnsupportedMediaType'
+
+    InternalServerError:
+      description: Unexpected server error
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            internal:
+              $ref: '#/components/examples/ErrorInternal'
+
+    InsufficientStorage:
+      description: Server storage capacity exhausted
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            noSpace:
+              $ref: '#/components/examples/ErrorInsufficientStorage'

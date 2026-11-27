@@ -1,0 +1,405 @@
+# Project: File Upload and Storage Server
+
+## Objective
+
+I want to develop a File Upload and Storage Server that provides REST APIs for uploading, storing, querying, downloading, and deleting files.
+
+The server must expose a REST API interface documented using OpenAPI 3.1 (Swagger).
+
+The server must store uploaded files in a directory on the server's filesystem and maintain file metadata in a file-based database.
+
+Before implementing the server, design the API and generate a complete, valid OpenAPI 3.1 specification in YAML format.
+
+---
+
+# 1. Functional Requirements
+
+## API 1: Upload a File
+
+### Endpoint
+POST /api/v1/files
+
+### Purpose
+Allow clients to upload a file to the server.
+
+### Requirements
+
+- The client must upload a file using `multipart/form-data`.
+- The API must support uploading one file per request.
+- The request shall contain the following fields:
+  - `file`: The actual file content.
+  - `encrypt`: Optional Boolean parameter indicating whether the uploaded file should be encrypted before being stored on the server.
+- The `encrypt` parameter must default to `false` if not specified.
+- The server must validate the uploaded file size against a configurable maximum file-size limit.
+- The server must reject files exceeding the configured maximum size.
+- The server must generate a unique ID for every uploaded file. UUID is preferred.
+- The server must generate a unique stored filename instead of relying on the original filename for physical storage.
+- The original filename must be preserved as metadata.
+- The file must be stored in a configurable directory on the server.
+- If encryption is enabled, the file must be encrypted before being persisted to disk.
+- The server must record the following metadata in the file-based database:
+  - File ID
+  - Original file name
+  - File size in bytes
+  - Encryption enabled/disabled
+  - Storage path
+  - Upload timestamp
+  - Content type
+- The storage path must be internal metadata and must not be exposed to the client.
+- The API must return the generated file ID and file metadata after successful upload.
+
+### Successful Response
+
+HTTP 201 Created
+
+Example:
+
+{
+  "id": "a9e84e21-95d0-4c88-bcb2-52b99b4d8470",
+  "name": "report.pdf",
+  "size": 1048576,
+  "contentType": "application/pdf",
+  "encrypted": true,
+  "uploadedAt": "2026-11-27T12:30:00Z"
+}
+
+---
+
+## API 2: Query/List Uploaded Files
+
+### Endpoint
+GET /api/v1/files
+
+### Purpose
+Retrieve metadata for the files stored on the server.
+
+### Requirements
+
+- The API must return a list of uploaded files.
+- The response must contain an array of file metadata objects.
+- The API must not return the actual binary file content.
+- Each file object must contain:
+  - File ID
+  - File name
+  - File size in bytes
+  - Content type
+  - Encryption status
+  - Upload timestamp
+- Implement pagination to support large numbers of files.
+- Support optional query parameters:
+  - `limit`: Maximum number of files returned per page.
+  - `offset`: Number of records to skip.
+- The API must return the total number of files matching the query.
+- The physical file storage path must not be returned.
+
+### Successful Response
+
+HTTP 200 OK
+
+Example:
+
+{
+  "total": 2,
+  "limit": 20,
+  "offset": 0,
+  "files": [
+    {
+      "id": "a9e84e21-95d0-4c88-bcb2-52b99b4d8470",
+      "name": "report.pdf",
+      "size": 1048576,
+      "contentType": "application/pdf",
+      "encrypted": true,
+      "uploadedAt": "2026-11-27T12:30:00Z"
+    },
+    {
+      "id": "b8f15a31-4a00-4a11-9910-83924ef8f210",
+      "name": "image.png",
+      "size": 204800,
+      "contentType": "image/png",
+      "encrypted": false,
+      "uploadedAt": "2026-11-27T12:35:00Z"
+    }
+  ]
+}
+
+---
+
+## API 3: Delete a File
+
+### Endpoint
+DELETE /api/v1/files/{fileId}
+
+### Purpose
+Delete a file from the server.
+
+### Requirements
+
+- The client must provide the file ID as a path parameter.
+- The server must validate the file ID.
+- The server must locate the file using the metadata database.
+- The server must delete the physical file from the storage directory.
+- The server must delete the corresponding metadata record from the database.
+- If the file does not exist, return HTTP 404.
+- The deletion operation must not leave inconsistent metadata or orphaned files under normal operation.
+- The API must handle filesystem errors gracefully.
+
+### Successful Response
+
+HTTP 204 No Content
+
+No response body is required.
+
+---
+
+## API 4: Download/Retrieve a File
+
+### Endpoint
+GET /api/v1/files/{fileId}/content
+
+### Purpose
+Allow clients to download a file using its file ID.
+
+### Requirements
+
+- The client must provide the file ID as a path parameter.
+- The server must retrieve the metadata for the requested file.
+- The server must locate the physical file using its internal storage path.
+- If the file was stored without encryption, the server must return the file as-is.
+- If the file was stored with encryption enabled, the server must decrypt the file during retrieval and return the original file content.
+- The downloaded file must retain the original filename.
+- The response must use an appropriate Content-Type header.
+- The response must include a Content-Disposition header that allows the client to download the file using its original filename.
+- The server must stream the file to the client instead of loading the entire file into memory.
+- If the file ID does not exist, return HTTP 404.
+- If decryption fails, return an appropriate error response without exposing encryption keys, cryptographic details, or sensitive server information.
+
+### Successful Response
+
+HTTP 200 OK
+
+The response body must contain the binary file content.
+
+Headers:
+
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="report.pdf"
+
+---
+
+# 2. Metadata Database Requirements
+
+Use a file-based database to store file metadata.
+
+Prefer SQLite because it provides a persistent file-based database, transactional operations, and structured queries.
+
+The database must store the following information:
+
+| Field | Description |
+|---|---|
+| id | Unique file ID generated by the server |
+| original_filename | Original filename supplied by the client |
+| stored_filename | Server-generated physical filename |
+| size_bytes | Original file size in bytes |
+| content_type | MIME type of the file |
+| encrypted | Boolean indicating whether encryption was used |
+| storage_path | Internal physical storage location |
+| uploaded_at | Upload timestamp in UTC |
+
+The database must not store the actual file content.
+
+The physical file content must be stored separately in a filesystem directory.
+
+---
+
+# 3. File Encryption Requirements
+
+The upload API must support optional file encryption.
+
+Requirements:
+
+- Use a secure, modern authenticated encryption algorithm.
+- Prefer AES-256-GCM.
+- Encryption keys must not be hardcoded into the application source code.
+- Encryption keys must be loaded from configuration or environment variables.
+- Encryption keys must never be returned through the API.
+- The encryption mechanism must support reliable decryption during download.
+- Encryption metadata such as nonce/IV and authentication tag must be handled securely.
+- Decryption errors must be handled properly.
+- The server must distinguish encrypted files from unencrypted files using stored metadata.
+- Encryption and decryption should support large files without requiring the entire file to be loaded into RAM, if the selected cryptographic implementation supports safe streaming.
+
+Document the encryption-related requirements and assumptions in the API design.
+
+---
+
+# 4. API Error Handling
+
+Define a consistent error response schema for all APIs.
+
+The error response should contain:
+
+- `code`: Machine-readable error code.
+- `message`: Human-readable error description.
+- `requestId`: Request identifier for troubleshooting.
+
+Example:
+
+{
+  "code": "FILE_NOT_FOUND",
+  "message": "The requested file does not exist.",
+  "requestId": "req-76b8f5d2"
+}
+
+Define responses for the following scenarios:
+
+- 400 Bad Request – Invalid request.
+- 404 Not Found – File ID does not exist.
+- 413 Payload Too Large – Uploaded file exceeds the maximum allowed size.
+- 415 Unsupported Media Type – Invalid upload content type or request type.
+- 500 Internal Server Error – Unexpected server error.
+- 507 Insufficient Storage – Storage capacity exhausted, if applicable.
+
+---
+
+# 5. API Design Requirements
+
+Use RESTful API design principles.
+
+API base path:
+
+/api/v1
+
+Use the following endpoints:
+
+| HTTP Method | Endpoint | Operation |
+|---|---|---|
+| POST | /api/v1/files | Upload a file |
+| GET | /api/v1/files | List uploaded files and metadata |
+| DELETE | /api/v1/files/{fileId} | Delete a file |
+| GET | /api/v1/files/{fileId}/content | Download a file |
+
+Use appropriate:
+
+- HTTP status codes.
+- Request content types.
+- Response content types.
+- Parameter definitions.
+- Request schemas.
+- Response schemas.
+- Error schemas.
+- Examples.
+- Descriptions.
+
+---
+
+# 6. OpenAPI/Swagger Requirements
+
+Generate a complete OpenAPI 3.1 YAML specification.
+
+The specification must include:
+
+- OpenAPI version.
+- API title.
+- API description.
+- API version.
+- Server URL definitions.
+- Tags.
+- All four API operations.
+- Detailed descriptions for every endpoint.
+- Path parameters.
+- Query parameters.
+- Multipart upload request definition.
+- Binary file upload definition.
+- File metadata response schemas.
+- File list response schema.
+- Binary file download response definition.
+- Error response schema.
+- Examples for all JSON request/response bodies.
+- Appropriate HTTP response codes.
+- Required and optional fields.
+- Schema validation constraints.
+- File upload size limit description.
+- Encryption parameter documentation.
+- Pagination documentation.
+- Content-Disposition download behavior.
+
+The specification must be compatible with Swagger UI and OpenAPI tools.
+
+Use correct OpenAPI definitions for binary file uploads and binary file downloads.
+
+For file upload, use multipart/form-data with a binary file field and an optional Boolean encryption field.
+
+For file download, document the response as binary data rather than JSON.
+
+---
+
+# 7. Security and Reliability Considerations
+
+Consider the following when designing the API:
+
+- Do not trust the client-provided filename for filesystem operations.
+- Prevent path traversal attacks.
+- Generate server-side filenames.
+- Validate file IDs.
+- Prevent access outside the configured storage directory.
+- Do not expose internal filesystem paths in responses.
+- Do not expose encryption keys.
+- Validate uploaded file sizes.
+- Handle partially uploaded files.
+- Avoid leaving incomplete files if upload or encryption fails.
+- Ensure database and filesystem operations are handled consistently.
+- Avoid loading large files into memory when streaming is possible.
+- Clearly document that authentication and authorization are not included in the initial API version, but the design should be extensible to support them in the future.
+
+---
+
+# 8. Expected Output
+
+Generate the following:
+
+### Output 1: OpenAPI Specification
+
+Generate a complete OpenAPI 3.1 YAML file.
+
+Filename:
+
+openapi.yaml
+
+This file must be directly usable with Swagger UI and OpenAPI validation tools.
+
+### Output 2: API Design Summary
+
+Provide a concise summary of the APIs, including:
+
+- Endpoint.
+- HTTP method.
+- Purpose.
+- Request parameters.
+- Response.
+- Status codes.
+
+### Output 3: Design Decisions
+
+Explain the important design decisions:
+
+- Why UUID is used for file IDs.
+- Why metadata is stored in SQLite.
+- Why actual file content is stored in the filesystem.
+- Why listing files should return metadata rather than binary content.
+- How optional encryption is represented.
+- How binary upload/download are represented in OpenAPI.
+
+### Output 4: Validation
+
+Verify that the generated OpenAPI YAML:
+
+- Is syntactically valid.
+- Conforms to OpenAPI 3.1.
+- Uses correct multipart/form-data definitions.
+- Uses correct binary file response definitions.
+- Has no missing schema references.
+- Has no duplicate operation IDs.
+
+Do not generate the server implementation yet.
+
+The immediate objective is to design the API correctly and generate a production-quality OpenAPI specification that can be used later to implement the server.

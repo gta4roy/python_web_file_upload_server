@@ -198,6 +198,29 @@ Each iteration: **upload → list → download → delete**. The runner generate
 
 Requires [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) on `PATH`.
 
+## Deployment package (Ubuntu host)
+
+Build a single offline tarball (app + pip wheels + start/stop scripts):
+
+```bash
+./package.sh
+# => dist/file-upload-server-<version>-linux-<arch>-py<ver>.tar.gz
+```
+
+On the Ubuntu server:
+
+```bash
+sudo apt-get install -y python3 python3-venv
+tar -xzf file-upload-server-*.tar.gz
+cd file-upload-server-*
+./install.sh
+nano config/.env          # set ENCRYPTION_KEY, APP_PORT, etc.
+./start_server.sh
+./stop_server.sh
+```
+
+See `DEPLOY.md` inside the extracted package for details.
+
 ## OpenAPI contract
 
 The public response and error shapes follow `openapi.yaml`:
